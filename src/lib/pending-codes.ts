@@ -1,53 +1,43 @@
 /**
- * Vercel KV-backed pending code store.
- * Key: pending:{email} → PendingEntry (TTL 10 min)
+ * JWT-based pending verification codes — no KV/database required.
+ * The signed token is returned to the client and sent back on verify.
+ * Stateless, works on Vercel Serverless/Edge without any storage setup.
  */
-import { kv } from "@vercel/kv";
+import { SignJWT, jwtVerify } from "jose";
 
-export interface PendingEntry {
-  email: string;
-  passwordHash: string;
-  code: string;
-  expiry: string;
-  sentAt: string;
-  used: boolean;
-}
+const secret = () =>
+  new TextEncoder().encode(process.env.JWT_SECRET ?? "usenly-fallback-secret-change-me");
 
-const TTL = 600; // 10 minutes in seconds
+const TTL_SECONDS = 600; // 10 minutes
 
 export const pendingCodes = {
-  async set(email: string, passwordHash: string, code: string): Promise<PendingEntry> {
-    const entry: PendingEntry = {
-      email: email.toLowerCase(),
-      passwordHash,
-      code,
-      expiry: new Date(Date.now() + TTL * 1000).toISOString(),
-      sentAt: new Date().toISOString(),
-      used: false,
-    };
-    await kv.set(`pending:${email.toLowerCase()}`, entry, { ex: TTL });
-    return entry;
+  /** Create a signed JWT containing pending registration data. Return to client. */
+  async createToken(email: string, passwordHash: string, code: string): Promise<string> {
+    return new SignJWT({ email, passwordHash, code })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuedAt()
+      .setExpirationTime(`${TTL_SECONDS}s`)
+      .sign(secret());
   },
 
-  async get(email: string): Promise<PendingEntry | undefined> {
-    return (await kv.get<PendingEntry>(`pending:${email.toLowerCase()}`)) ?? undefined;
-  },
-
-  async updateCode(email: string, newCode: string): Promise<boolean> {
-    const existing = await kv.get<PendingEntry>(`pending:${email.toLowerCase()}`);
-    if (!existing) return false;
-    const updated: PendingEntry = {
-      ...existing,
-      code: newCode,
-      expiry: new Date(Date.now() + TTL * 1000).toISOString(),
-      sentAt: new Date().toISOString(),
-      used: false,
-    };
-    await kv.set(`pending:${email.toLowerCase()}`, updated, { ex: TTL });
-    return true;
-  },
-
-  async remove(email: string): Promise<void> {
-    await kv.del(`pending:${email.toLowerCase()}`);
+  /**
+   * Verify a token + user-entered code.
+   * Returns { email, passwordHash } on success, null on any failure.
+   */
+  async verify(
+    token: string,
+    code: string,
+  ): Promise<{ email: string; passwordHash: string } | null> {
+    try {
+      const { payload } = await jwtVerify(token, secret());
+      if (typeof payload.code !== "string") return null;
+      if (payload.code !== code.trim()) return null;
+      return {
+        email:        payload.email as string,
+        passwordHash: payload.passwordHash as string,
+      };
+    } catch {
+      return null;
+    }
   },
 };

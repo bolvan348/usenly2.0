@@ -2,7 +2,7 @@
 
 import { motion, useMotionValue, useTransform, animate } from "framer-motion";
 import Link from "next/link";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { PixelPenguin } from "@/components/bear/PixelPenguin";
 import type { BearRarity } from "@/lib/bear-types";
 
@@ -43,33 +43,47 @@ function CounterNumber({ to, duration = 2.2 }: { to: number; duration?: number }
   return <motion.span>{rounded}</motion.span>;
 }
 
-/* ── Mint progress bar embedded in stats ── */
-const TOTAL   = 10_000;
-const MINTED  = 1_247;  // decreases as users claim
+/* ── Mint progress bar — fetches real data from /api/stats ── */
+const TOTAL = 10_000;
 
 function MintProgress() {
-  const pct = Math.round((MINTED / TOTAL) * 100);
+  const [minted, setMinted] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/stats")
+      .then(r => r.json())
+      .then(d => {
+        if (typeof d.minted === "number") {
+          setMinted(d.minted);
+        }
+        setLoaded(true);
+      })
+      .catch(() => setLoaded(true));
+  }, []);
+
+  const pct = Math.round((minted / TOTAL) * 100);
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
+      animate={{ opacity: loaded ? 1 : 0 }}
       transition={{ delay: 0.82, duration: 0.5 }}
       className="mt-8 border-t-2 border-dashed border-[#0A0A0A]/15 pt-6"
     >
       <div className="flex items-end justify-between mb-2">
         <div>
           <p className="font-pixel text-[1.8rem] leading-none text-[#0A0A0A] sm:text-[2.2rem]">
-            <CounterNumber to={TOTAL - MINTED} />
+            <CounterNumber to={TOTAL - minted} />
           </p>
           <p className="mt-1.5 font-pixel text-[9px] tracking-widest text-[#0A0A0A]/35 sm:text-[10px]">
             REMAINING
           </p>
         </div>
         <p className="font-pixel text-[10px] tracking-widest text-[#0A0A0A]/30 sm:text-[11px]">
-          {MINTED.toLocaleString()} / {TOTAL.toLocaleString()} MINTED
+          {minted.toLocaleString("en-US")} / {TOTAL.toLocaleString("en-US")} MINTED
         </p>
       </div>
-      {/* Progress bar */}
       <div className="h-2 w-full bg-[#0A0A0A]/10 border border-[#0A0A0A]/10">
         <motion.div
           initial={{ width: 0 }}

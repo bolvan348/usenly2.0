@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
@@ -126,7 +126,9 @@ function StepBar({ step }: { step: number }) {
 /* ══════════════════════════════════════
    STEP 0 — Register / Sign In
 ══════════════════════════════════════ */
-type RegisterOpts = { mode: "register" } | { mode: "login"; handle?: string | null };
+type RegisterOpts =
+  | { mode: "register"; pendingToken: string }
+  | { mode: "login"; handle?: string | null };
 
 function StepRegister({ onNext }: { onNext: (email: string, opts: RegisterOpts) => void }) {
   const [mode,     setMode]     = useState<"register" | "login">("register");
@@ -145,7 +147,6 @@ function StepRegister({ onNext }: { onNext: (email: string, opts: RegisterOpts) 
     setLoading(true);
     try {
       if (mode === "register") {
-        // Send code first — account created only after verification
         const res = await fetch("/api/auth/send-code", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -153,9 +154,8 @@ function StepRegister({ onNext }: { onNext: (email: string, opts: RegisterOpts) 
         });
         const data = await res.json();
         if (!res.ok) { setError(`ERR: ${(data.error as string).toUpperCase()}`); return; }
-        onNext(email.trim().toLowerCase(), { mode: "register" });
+        onNext(email.trim().toLowerCase(), { mode: "register", pendingToken: data.pendingToken as string });
       } else {
-        // Login — account already exists
         const res = await fetch("/api/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -220,45 +220,28 @@ function StepRegister({ onNext }: { onNext: (email: string, opts: RegisterOpts) 
 
 /* ══════════════════════════════════════
    STEP 1 — Email verification
-   Account is created ONLY on success.
+   Uses JWT pendingToken — no KV needed.
 ══════════════════════════════════════ */
 type CodeState = "idle" | "correct" | "wrong";
 
 function StepEmailVerify({
   email,
+  pendingToken,
   onVerified,
+  onTokenRefresh,
 }: {
   email: string;
+  pendingToken: string;
   onVerified: () => void;
+  onTokenRefresh: (newToken: string) => void;
 }) {
   const [code,     setCode]     = useState("");
   const [state,    setState]    = useState<CodeState>("idle");
   const [loading,  setLoading]  = useState(false);
-  const [cooldown, setCooldown] = useState(60);  // starts counting from send
+  const [cooldown, setCooldown] = useState(60);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Start cooldown on mount (code already sent)
-  useEffect(() => {
-    timerRef.current = setInterval(() => {
-      setCooldown(v => {
-        if (v <= 1) { clearInterval(timerRef.current!); return 0; }
-        return v - 1;
-      });
-    }, 1000);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, []);
-
-  async function resend() {
-    if (cooldown > 0) return;
-    // Silent — no errors shown to user
-    try {
-      await fetch("/api/auth/resend-code", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-    } catch { /* silent */ }
-    setCooldown(60);
+  const startCooldown = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = setInterval(() => {
       setCooldown(v => {
@@ -266,6 +249,28 @@ function StepEmailVerify({
         return v - 1;
       });
     }, 1000);
+  }, []);
+
+  useEffect(() => {
+    startCooldown();
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [startCooldown]);
+
+  async function resend() {
+    if (cooldown > 0) return;
+    try {
+      const res = await fetch("/api/auth/resend-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, pendingToken }),
+      });
+      const data = await res.json();
+      if (res.ok && data.pendingToken) {
+        onTokenRefresh(data.pendingToken as string);
+      }
+    } catch { /* silent */ }
+    setCooldown(60);
+    startCooldown();
     setCode("");
     setState("idle");
   }
@@ -279,7 +284,7 @@ function StepEmailVerify({
       const res = await fetch("/api/auth/verify-and-register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, code: code.trim() }),
+        body: JSON.stringify({ email, code: code.trim(), pendingToken }),
       });
       if (res.ok) {
         setState("correct");
@@ -298,14 +303,10 @@ function StepEmailVerify({
     <form onSubmit={verify} className="space-y-5">
       <SLabel label="VERIFY EMAIL" />
       <div className="space-y-5 pt-2">
-
-        {/* Sent to */}
         <div className="border-2 border-dashed border-[#0A0A0A]/20 bg-[#F7F7F5] px-4 py-3">
           <p className="font-pixel text-[10px] tracking-widest text-[#0A0A0A]/40">CODE SENT TO:</p>
           <p className="mt-1 font-pixel text-[12px] tracking-wide text-[#0A0A0A] truncate">{email}</p>
         </div>
-
-        {/* Code input */}
         <div>
           <p className="mb-1.5 font-pixel text-[11px] tracking-widest text-[#0A0A0A]/45">&gt; 6-DIGIT CODE:</p>
           <input
@@ -324,8 +325,6 @@ function StepEmailVerify({
             }`}
           />
         </div>
-
-        {/* Result — ONLY 2 possible messages */}
         <AnimatePresence mode="wait">
           {state === "correct" && (
             <motion.div key="ok"
@@ -344,14 +343,11 @@ function StepEmailVerify({
             </motion.div>
           )}
         </AnimatePresence>
-
         <button type="submit"
           disabled={loading || code.length !== 6 || state === "correct"}
           className={BTN_PRIMARY}>
           {loading ? "[ VERIFYING... ]" : "[ CONFIRM CODE ]"}
         </button>
-
-        {/* Resend */}
         <div className="flex items-center justify-between pt-1">
           <span className="font-pixel text-[10px] tracking-widest text-[#0A0A0A]/30">
             {cooldown > 0 ? `RESEND IN ${cooldown}s` : "DIDN'T RECEIVE IT?"}
@@ -367,80 +363,212 @@ function StepEmailVerify({
 }
 
 /* ══════════════════════════════════════
-   STEP 2 — Telegram verify
+   STEP 2 — Telegram verify (real polling)
 ══════════════════════════════════════ */
+type TgStatus = "waiting" | "polling" | "done" | "timeout";
+
 function StepTelegram({ email, onNext }: { email: string; onNext: () => void }) {
   const code   = generateVerifyCode(email);
   const botUrl = `https://t.me/usenlybot?start=${code}`;
-  const [status,  setStatus]  = useState<"waiting" | "polling" | "done">("waiting");
-  const [copied,  setCopied]  = useState(false);
-  const [pollMsg, setPollMsg] = useState("");
+
+  const [status,    setStatus]    = useState<TgStatus>("waiting");
+  const [copied,    setCopied]    = useState(false);
+  const [copyError, setCopyError] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+
+  const pollRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const attemptsRef  = useRef(0);
+  const MAX_ATTEMPTS = 30; // 30 × 2s = 60s
+
+  function stopAll() {
+    if (pollRef.current)  clearTimeout(pollRef.current);
+    if (timerRef.current) clearInterval(timerRef.current);
+  }
+  useEffect(() => () => stopAll(), []);
+
+  /* ── Copy with fallback for HTTP / older browsers ── */
+  function copyCode() {
+    const text = `/${code}`;
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); })
+        .catch(() => fallbackCopy(text));
+    } else {
+      fallbackCopy(text);
+    }
+  }
+
+  function fallbackCopy(text: string) {
+    try {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.style.position = "fixed";
+      el.style.opacity  = "0";
+      document.body.appendChild(el);
+      el.focus(); el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+      setCopied(true); setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopyError(true); setTimeout(() => setCopyError(false), 3000);
+    }
+  }
+
+  /* ── Polling ── */
+  const doPoll = useCallback(async () => {
+    attemptsRef.current++;
+    if (attemptsRef.current > MAX_ATTEMPTS) {
+      stopAll();
+      setStatus("timeout");
+      setCountdown(0);
+      return;
+    }
+
+    try {
+      const res  = await fetch(`/api/auth/telegram-status?email=${encodeURIComponent(email)}`);
+      const data = await res.json() as { verified?: boolean };
+      if (data.verified) {
+        stopAll();
+        setStatus("done");
+        setCountdown(0);
+        setTimeout(onNext, 700);
+        return;
+      }
+    } catch { /* keep polling */ }
+
+    pollRef.current = setTimeout(doPoll, 2000);
+  }, [email, onNext]);
 
   function startPolling() {
+    stopAll();
+    attemptsRef.current = 0;
     setStatus("polling");
-    const msgs = ["CONNECTING TO TELEGRAM...", "AWAITING BOT RESPONSE...", "CHECKING VERIFICATION...", "CONFIRMED ✓"];
-    let i = 0; setPollMsg(msgs[0]);
-    const iv = setInterval(() => {
-      i++;
-      if (i < msgs.length) setPollMsg(msgs[i]);
-      else { clearInterval(iv); setStatus("done"); setTimeout(onNext, 700); }
-    }, 700);
+    setCountdown(MAX_ATTEMPTS * 2); // seconds
+
+    // Countdown timer
+    timerRef.current = setInterval(() => {
+      setCountdown(v => (v <= 1 ? 0 : v - 1));
+    }, 1000);
+
+    doPoll();
   }
 
-  function copyCode() {
-    navigator.clipboard.writeText(`/verify ${code}`).then(() => {
-      setCopied(true); setTimeout(() => setCopied(false), 2000);
-    });
+  function cancelPolling() {
+    stopAll();
+    setStatus("waiting");
+    setCountdown(0);
   }
+
+  const isPolling = status === "polling";
 
   return (
     <div className="space-y-5">
       <SLabel label="CONNECT TELEGRAM" />
       <div className="space-y-4 pt-2">
+
+        {/* Instructions */}
         <div className="border-2 border-dashed border-[#0A0A0A]/20 bg-[#F7F7F5] p-4">
           <p className="font-pixel text-[11px] tracking-wide text-[#0A0A0A]/60">STEPS:</p>
-          <ol className="mt-2 space-y-1 font-pixel text-[11px] text-[#0A0A0A]">
-            <li>1. OPEN THE BOT BELOW</li>
-            <li>2. SEND THE COMMAND SHOWN</li>
-            <li>3. CLICK <span className="text-[#CC0000]">[ I SENT IT ]</span></li>
+          <ol className="mt-2 space-y-1.5 font-pixel text-[11px] text-[#0A0A0A]">
+            <li><span className="text-[#CC0000]">1.</span> COPY THE CODE BELOW</li>
+            <li><span className="text-[#CC0000]">2.</span> OPEN BOT → PASTE &amp; SEND</li>
+            <li><span className="text-[#CC0000]">3.</span> CLICK <span className="text-[#CC0000] font-bold">[ I SENT IT ]</span></li>
           </ol>
         </div>
+
+        {/* Code box */}
         <div>
-          <p className="mb-1.5 font-pixel text-[11px] tracking-widest text-[#0A0A0A]/45">&gt; SEND TO @usenlybot:</p>
-          <div className="flex items-center border-2 border-[#0A0A0A] bg-white overflow-hidden">
-            <code className="flex-1 min-w-0 px-3 py-3 font-pixel text-[12px] tracking-wide text-[#CC0000] truncate">
-              /verify {code}
+          <p className="mb-1.5 font-pixel text-[11px] tracking-widest text-[#0A0A0A]/45">
+            &gt; SEND THIS TO @usenlybot:
+          </p>
+          <div className="flex items-stretch border-2 border-[#0A0A0A] bg-white overflow-hidden">
+            <code className="flex-1 min-w-0 px-4 py-3 font-pixel text-[13px] tracking-widest text-[#CC0000] select-all">
+              /{code}
             </code>
-            <button type="button" onClick={copyCode}
-              className="shrink-0 border-l-2 border-[#0A0A0A] px-3 py-3 font-pixel text-[10px] tracking-widest text-[#0A0A0A]/45 transition-colors hover:bg-[#0A0A0A] hover:text-white">
-              {copied ? "✓" : "COPY"}
+            <button
+              type="button"
+              onClick={copyCode}
+              className={`shrink-0 border-l-2 border-[#0A0A0A] px-4 py-3 font-pixel text-[11px] tracking-widest transition-colors ${
+                copied
+                  ? "bg-[#28C840] text-white border-[#28C840]"
+                  : copyError
+                  ? "bg-[#CC0000] text-white"
+                  : "text-[#0A0A0A]/45 hover:bg-[#0A0A0A] hover:text-white"
+              }`}
+            >
+              {copied ? "✓ COPIED" : copyError ? "SELECT ↑" : "COPY"}
             </button>
           </div>
+          {copyError && (
+            <p className="mt-1 font-pixel text-[10px] text-[#CC0000]">
+              Auto-copy failed — select the code manually and copy
+            </p>
+          )}
         </div>
-        <a href={botUrl} target="_blank" rel="noopener noreferrer"
-          className="flex w-full items-center justify-center gap-2 border-2 border-[#0A0A0A] bg-white py-3 font-pixel text-[13px] tracking-widest text-[#0A0A0A] shadow-[4px_4px_0_#0A0A0A] transition-all hover:shadow-none hover:translate-x-1 hover:translate-y-1">
+
+        {/* Open bot button */}
+        <a
+          href={botUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex w-full items-center justify-center gap-2 border-2 border-[#0A0A0A] bg-white py-3 font-pixel text-[13px] tracking-widest text-[#0A0A0A] shadow-[4px_4px_0_#0A0A0A] transition-all hover:shadow-none hover:translate-x-1 hover:translate-y-1"
+        >
           <span className="text-[#CC0000]">✈</span> OPEN @usenlybot
         </a>
+
         <div className="flex items-center gap-3">
           <div className="flex-1 border-t border-dashed border-[#0A0A0A]/15" />
           <span className="font-pixel text-[10px] tracking-widest text-[#0A0A0A]/30">THEN</span>
           <div className="flex-1 border-t border-dashed border-[#0A0A0A]/15" />
         </div>
-        {status === "waiting" && (
-          <button type="button" onClick={startPolling} className={BTN_PRIMARY}>
-            [ I SENT IT — VERIFY ]
-          </button>
-        )}
-        {status === "polling" && (
-          <div className="flex items-center gap-3 border-2 border-[#0A0A0A] bg-white px-4 py-3">
-            <span className="h-2 w-2 shrink-0 animate-pulse bg-[#CC0000]" />
-            <span className="font-pixel text-[11px] tracking-widest text-[#0A0A0A] truncate">{pollMsg}</span>
-          </div>
-        )}
-        {status === "done" && (
-          <div className="flex items-center gap-3 border-2 border-[#CC0000] bg-white px-4 py-3">
-            <span className="font-pixel text-[14px] text-[#CC0000]">✓</span>
-            <span className="font-pixel text-[11px] tracking-widest text-[#CC0000]">TELEGRAM VERIFIED</span>
+
+        {/* Status / action area */}
+        {status === "done" ? (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
+            className="flex items-center gap-3 border-2 border-[#28C840] bg-[#28C840]/8 px-4 py-3"
+          >
+            <span className="font-pixel text-[18px] text-[#28C840]">✓</span>
+            <span className="font-pixel text-[12px] tracking-widest text-[#28C840]">TELEGRAM VERIFIED</span>
+          </motion.div>
+        ) : (
+          <div className="space-y-2">
+            {/* Polling status bar */}
+            {isPolling && (
+              <div className="flex items-center justify-between border-2 border-[#0A0A0A]/20 bg-[#F7F7F5] px-4 py-2.5">
+                <div className="flex items-center gap-2.5">
+                  <span className="h-2 w-2 shrink-0 animate-pulse bg-[#CC0000]" />
+                  <span className="font-pixel text-[10px] tracking-widest text-[#0A0A0A]/60">
+                    CHECKING...
+                  </span>
+                </div>
+                <span className="font-pixel text-[10px] tracking-widest text-[#0A0A0A]/35">
+                  {countdown}s
+                </span>
+              </div>
+            )}
+
+            {status === "timeout" && (
+              <div className="flex items-center gap-2.5 border-2 border-[#CC0000]/50 bg-[#CC0000]/5 px-4 py-2.5">
+                <span className="font-pixel text-[10px] tracking-widest text-[#CC0000]">
+                  ✗ NOT DETECTED — SEND THE CODE AND TRY AGAIN
+                </span>
+              </div>
+            )}
+
+            {/* Main action button */}
+            <button
+              type="button"
+              onClick={isPolling ? cancelPolling : startPolling}
+              className={`${BTN_PRIMARY} ${isPolling ? "opacity-60" : ""}`}
+            >
+              {isPolling
+                ? "[ CANCEL ]"
+                : status === "timeout"
+                ? "[ TRY AGAIN ]"
+                : "[ I SENT IT — VERIFY ]"}
+            </button>
           </div>
         )}
       </div>
@@ -449,7 +577,7 @@ function StepTelegram({ email, onNext }: { email: string; onNext: () => void }) 
 }
 
 /* ══════════════════════════════════════
-   STEP 3 — Payment
+   STEP 3 — Payment (real TON transaction)
 ══════════════════════════════════════ */
 const RARITY_COLORS: Record<BearRarity, string> = {
   common: "#888888", rare: "#2979FF", epic: "#D500F9", legendary: "#FFD600", mythic: "#CC0000",
@@ -465,8 +593,9 @@ type PayState = "idle" | "connecting" | "pending" | "confirmed" | "error";
 
 function StepPayment({ onNext }: { onNext: (amount: number) => void }) {
   const [selected,  setSelected]  = useState<number | null>(null);
-  const [tonPrice,  setTonPrice]  = useState<number>(5);   // USD per 1 TON
+  const [tonPrice,  setTonPrice]  = useState<number>(5);
   const [payState,  setPayState]  = useState<PayState>("idle");
+  const [payError,  setPayError]  = useState("");
   const [tonConnectUI] = useTonConnectUI();
   const walletAddr    = useTonAddress();
 
@@ -478,7 +607,7 @@ function StepPayment({ onNext }: { onNext: (amount: number) => void }) {
         const price = d?.rates?.TON?.prices?.USD;
         if (typeof price === "number" && price > 0) setTonPrice(price);
       })
-      .catch(() => { /* keep default */ });
+      .catch(() => {});
   }, []);
 
   function tonAmount(usd: number): string {
@@ -487,18 +616,63 @@ function StepPayment({ onNext }: { onNext: (amount: number) => void }) {
 
   async function handlePay() {
     if (!selected) return;
+    setPayError("");
+
+    // Step 1: connect wallet if not connected
+    if (!walletAddr) {
+      setPayState("connecting");
+      try {
+        await tonConnectUI.openModal();
+        // Modal opened — user needs to connect. We'll detect connection via walletAddr change
+      } catch {
+        setPayState("idle");
+      }
+      return;
+    }
+
+    // Step 2: send transaction
     setPayState("pending");
-    // TODO: re-enable TON transaction when payments go live
-    await new Promise(r => setTimeout(r, 900));
-    setPayState("confirmed");
-    setTimeout(() => onNext(selected), 800);
+    try {
+      const nanotons = Math.round((selected / tonPrice) * 1e9);
+      await tonConnectUI.sendTransaction({
+        validUntil: Math.floor(Date.now() / 1000) + 300, // 5 min
+        messages: [{
+          address: TON_RECEIVER,
+          amount: String(nanotons),
+          payload: "", // optional comment
+        }],
+      });
+
+      // Transaction sent successfully
+      setPayState("confirmed");
+      setTimeout(() => onNext(selected), 800);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("User rejects") || msg.includes("CANCELLED")) {
+        // User cancelled — reset to idle
+        setPayState("idle");
+      } else {
+        setPayState("error");
+        setPayError("ERR: TRANSACTION FAILED — TRY AGAIN");
+      }
+    }
   }
 
+  // When wallet connects while in "connecting" state, auto-proceed to payment
+  useEffect(() => {
+    if (walletAddr && payState === "connecting") {
+      handlePay();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddr]);
+
   const btnLabel = () => {
-    if (!selected)             return "[ SELECT A PACKAGE ]";
-    if (payState === "pending")    return "[ PROCESSING... ]";
-    if (payState === "confirmed")  return "[ CONFIRMED ✓ ]";
-    return `[ CONTINUE WITH $${selected} PACKAGE ]`;
+    if (!selected)                    return "[ SELECT A PACKAGE ]";
+    if (payState === "connecting")    return "[ CONNECTING WALLET... ]";
+    if (payState === "pending")       return "[ CONFIRM IN WALLET... ]";
+    if (payState === "confirmed")     return "[ CONFIRMED ✓ ]";
+    if (!walletAddr)                  return `[ CONNECT WALLET & PAY $${selected} ]`;
+    return `[ PAY ${tonAmount(selected)} TON ($${selected}) ]`;
   };
 
   const btnDisabled = !selected || payState === "connecting" || payState === "pending" || payState === "confirmed";
@@ -511,7 +685,7 @@ function StepPayment({ onNext }: { onNext: (amount: number) => void }) {
         {TIERS.map((tier) => (
           <button key={tier.amount} type="button"
             disabled={payState !== "idle" && payState !== "error"}
-            onClick={() => setSelected(tier.amount)}
+            onClick={() => { setSelected(tier.amount); setPayState("idle"); setPayError(""); }}
             className={`border-2 p-3 text-left transition-all disabled:opacity-60 ${
               selected === tier.amount
                 ? "border-[#CC0000] shadow-[3px_3px_0_#CC0000] -translate-x-[3px] -translate-y-[3px]"
@@ -537,7 +711,6 @@ function StepPayment({ onNext }: { onNext: (amount: number) => void }) {
         ))}
       </div>
 
-      {/* Wallet status */}
       {walletAddr && (
         <div className="flex items-center gap-2 border border-dashed border-[#0A0A0A]/20 bg-[#F7F7F5] px-3 py-2">
           <span className="h-1.5 w-1.5 bg-[#28C840] shrink-0" />
@@ -552,9 +725,12 @@ function StepPayment({ onNext }: { onNext: (amount: number) => void }) {
         <p className="font-pixel text-[9px] tracking-widest text-[#0A0A0A]/30">PAYS IN TON</p>
       </div>
 
-      {/* Pay / confirm button */}
+      {payError && (
+        <p className="font-pixel text-[12px] text-[#CC0000] break-words">{payError}</p>
+      )}
+
       <button type="button" disabled={btnDisabled} onClick={handlePay}
-        className={`${BTN_PRIMARY} ${payState === "confirmed" ? "!border-[#28C840] !bg-[#28C840] !shadow-none" : ""} ${payState === "error" ? "!border-[#CC0000]/60" : ""}`}>
+        className={`${BTN_PRIMARY} ${payState === "confirmed" ? "!border-[#28C840] !bg-[#28C840] !shadow-none" : ""}`}>
         {payState === "pending" || payState === "connecting"
           ? <span className="flex items-center justify-center gap-2">
               <span className="h-2 w-2 animate-pulse bg-white/60" />
@@ -711,27 +887,27 @@ function StepDone({ email, handle, payment }: { email: string; handle: string; p
 ══════════════════════════════════════ */
 export function StartFlow() {
   const searchParams = useSearchParams();
-  const [step,    setStep]    = useState(0);
-  const [email,   setEmail]   = useState("");
-  const [payment, setPayment] = useState(2);
-  const [handle,  setHandle]  = useState("");
+  const [step,         setStep]         = useState(0);
+  const [email,        setEmail]        = useState("");
+  const [pendingToken, setPendingToken] = useState("");
+  const [payment,      setPayment]      = useState(2);
+  const [handle,       setHandle]       = useState("");
   const { user, setUser, hydrated } = useUser();
 
   useEffect(() => {
     if (!hydrated) return;
-    if (!user?.email) return;          // no session → stay at step 0
+    if (!user?.email) return;
 
     setEmail(user.email);
     if (user.payment) setPayment(user.payment);
     if (user.handle)  setHandle(user.handle);
 
-    // Resume at the furthest completed step
     if (user.handle && user.payment) {
-      setStep(5);   // fully done
+      setStep(5);
     } else if (user.payment) {
-      setStep(4);   // paid but haven't claimed yet
+      setStep(4);
     } else {
-      setStep(2);   // account exists (email verified) → jump to Telegram
+      setStep(2);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated]);
@@ -742,9 +918,10 @@ export function StartFlow() {
     setEmail(em);
     if (opts.mode === "login") {
       setUser({ email: em });
-      setStep(opts.handle ? 5 : 2);   // skip email verify for existing accounts
+      setStep(opts.handle ? 5 : 2);
     } else {
-      setStep(1);   // new account → email verify
+      setPendingToken(opts.pendingToken);
+      setStep(1);
     }
   }
 
@@ -785,7 +962,14 @@ export function StartFlow() {
                 initial={{opacity:0,x:12}} animate={{opacity:1,x:0}}
                 exit={{opacity:0,x:-12}} transition={{duration:0.2}}>
                 {step === 0 && <StepRegister onNext={onRegister} />}
-                {step === 1 && <StepEmailVerify email={email} onVerified={onVerified} />}
+                {step === 1 && (
+                  <StepEmailVerify
+                    email={email}
+                    pendingToken={pendingToken}
+                    onVerified={onVerified}
+                    onTokenRefresh={setPendingToken}
+                  />
+                )}
                 {step === 2 && <StepTelegram email={email} onNext={() => setStep(3)} />}
                 {step === 3 && <StepPayment onNext={onPayment} />}
                 {step === 4 && <StepClaim payment={payment} email={email} onNext={onClaim} />}

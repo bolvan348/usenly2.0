@@ -1,40 +1,54 @@
+/**
+ * Resend a verification code by issuing a fresh JWT token.
+ * Client must pass the old pendingToken so we can extract email/passwordHash.
+ */
 import { NextRequest, NextResponse } from "next/server";
 import { pendingCodes } from "@/lib/pending-codes";
 import { sendVerificationEmail } from "@/lib/emailjs";
 
 export async function POST(req: NextRequest) {
-  let email: string;
   try {
-    ({ email } = await req.json());
-  } catch {
-    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
-  }
+    let email: string, pendingToken: string;
+    try {
+      ({ email, pendingToken } = await req.json());
+    } catch {
+      return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+    }
 
-  if (!email?.trim()) {
-    return NextResponse.json({ error: "Email required" }, { status: 400 });
-  }
+    if (!email?.trim()) {
+      return NextResponse.json({ error: "Email required" }, { status: 400 });
+    }
 
-  const normalizedEmail = email.trim().toLowerCase();
-  const existing = await pendingCodes.get(normalizedEmail);
+    // Verify the old token to get passwordHash (code itself can be wrong/expired — that's ok)
+    // We pass a dummy code that won't match, so we only extract payload via a relaxed verify
+    // Instead, we re-create a token using the passwordHash from the old one
+    const normalizedEmail = email.trim().toLowerCase();
 
-  if (!existing) {
-    return NextResponse.json({ error: "No pending verification for this email" }, { status: 400 });
-  }
+    // Extract payload from old token without strict code checking
+    let passwordHash = "";
+    try {
+      // Try to verify with any code — we need the passwordHash
+      const { jwtVerify } = await import("jose");
+      const secret = new TextEncoder().encode(process.env.JWT_SECRET ?? "usenly-fallback-secret-change-me");
+      const { payload } = await jwtVerify(pendingToken, secret);
+      passwordHash = payload.passwordHash as string;
+    } catch {
+      return NextResponse.json({ error: "Invalid or expired session. Please restart registration." }, { status: 400 });
+    }
 
-  const elapsed = Date.now() - new Date(existing.sentAt).getTime();
-  if (elapsed < 60_000) {
-    return NextResponse.json({ error: "Please wait before requesting a new code" }, { status: 429 });
-  }
+    const newCode = String(Math.floor(100000 + Math.random() * 900000));
+    const newToken = await pendingCodes.createToken(normalizedEmail, passwordHash, newCode);
 
-  const newCode = String(Math.floor(100000 + Math.random() * 900000));
-  await pendingCodes.updateCode(normalizedEmail, newCode);
+    try {
+      await sendVerificationEmail(normalizedEmail, newCode);
+    } catch (err) {
+      console.error("[resend-code] email error:", err);
+      return NextResponse.json({ error: "Failed to send email" }, { status: 500 });
+    }
 
-  try {
-    await sendVerificationEmail(normalizedEmail, newCode);
+    return NextResponse.json({ ok: true, pendingToken: newToken });
   } catch (err) {
-    console.error("[resend-code]", err);
-    return NextResponse.json({ error: "Failed to send email" }, { status: 500 });
+    console.error("[resend-code] unexpected:", err);
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
-
-  return NextResponse.json({ ok: true });
 }

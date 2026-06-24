@@ -1,11 +1,8 @@
 /**
- * Vercel KV-backed user store.
- * Key layout:
- *   user:{id}               → DBUser JSON
- *   idx:email:{email}       → user id
- *   idx:fp:{fingerprintId}  → Redis Set of user ids
+ * Database adapter with automatic fallback:
+ *  - Vercel KV (production) when KV_REST_API_URL + KV_REST_API_TOKEN are set
+ *  - Local JSON file (.data/db.json) for local development — no setup needed
  */
-import { kv } from "@vercel/kv";
 import { randomUUID } from "crypto";
 
 export interface DBUser {
@@ -27,22 +24,150 @@ export interface DBUser {
   emailVerified?: boolean;
 }
 
+/* ─────────────────────────────────────────────
+   Generic KV interface
+───────────────────────────────────────────── */
+interface KVStore {
+  get<T>(key: string): Promise<T | null>;
+  set(key: string, value: unknown, opts?: { ex?: number }): Promise<void>;
+  del(key: string): Promise<void>;
+  incr(key: string): Promise<number>;
+  sadd(key: string, ...members: string[]): Promise<void>;
+  smembers(key: string): Promise<string[]>;
+}
+
+/* ─────────────────────────────────────────────
+   Local JSON file adapter (dev only)
+───────────────────────────────────────────── */
+function makeFileAdapter(): KVStore {
+  // Dynamic imports so Next.js doesn't bundle fs in the browser
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs   = require("fs")  as typeof import("fs");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const path = require("path") as typeof import("path");
+
+  const DATA_DIR = path.join(process.cwd(), ".data");
+  const DB_FILE  = path.join(DATA_DIR, "db.json");
+
+  type Store = {
+    kv:   Record<string, unknown>;
+    sets: Record<string, string[]>;
+    ttls: Record<string, number>;     // unix ms expiry
+  };
+
+  function read(): Store {
+    try {
+      if (!fs.existsSync(DB_FILE)) return { kv: {}, sets: {}, ttls: {} };
+      return JSON.parse(fs.readFileSync(DB_FILE, "utf-8")) as Store;
+    } catch {
+      return { kv: {}, sets: {}, ttls: {} };
+    }
+  }
+
+  function write(s: Store): void {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(DB_FILE, JSON.stringify(s, null, 2));
+  }
+
+  function isExpired(s: Store, key: string): boolean {
+    const exp = s.ttls[key];
+    return exp !== undefined && Date.now() > exp;
+  }
+
+  return {
+    async get<T>(key: string): Promise<T | null> {
+      const s = read();
+      if (isExpired(s, key)) { delete s.kv[key]; delete s.ttls[key]; write(s); return null; }
+      return (s.kv[key] as T) ?? null;
+    },
+    async set(key: string, value: unknown, opts?: { ex?: number }): Promise<void> {
+      const s = read();
+      s.kv[key] = value;
+      if (opts?.ex) s.ttls[key] = Date.now() + opts.ex * 1000;
+      write(s);
+    },
+    async del(key: string): Promise<void> {
+      const s = read();
+      delete s.kv[key]; delete s.ttls[key]; delete s.sets[key];
+      write(s);
+    },
+    async incr(key: string): Promise<number> {
+      const s = read();
+      const cur = typeof s.kv[key] === "number" ? (s.kv[key] as number) : 0;
+      s.kv[key] = cur + 1;
+      write(s);
+      return cur + 1;
+    },
+    async sadd(key: string, ...members: string[]): Promise<void> {
+      const s = read();
+      if (!Array.isArray(s.sets[key])) s.sets[key] = [];
+      for (const m of members) if (!s.sets[key].includes(m)) s.sets[key].push(m);
+      write(s);
+    },
+    async smembers(key: string): Promise<string[]> {
+      const s = read();
+      return s.sets[key] ?? [];
+    },
+  };
+}
+
+/* ─────────────────────────────────────────────
+   Vercel KV adapter (production)
+───────────────────────────────────────────── */
+function makeKVAdapter(): KVStore {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { kv } = require("@vercel/kv") as { kv: import("@vercel/kv").VercelKV };
+  return {
+    get:      (key)          => kv.get(key),
+    set:      (key, val, o)  => kv.set(key, val, o ?? {}).then(() => undefined),
+    del:      (key)          => kv.del(key).then(() => undefined),
+    incr:     (key)          => kv.incr(key),
+    sadd:     (key, ...m)    => kv.sadd(key, ...m).then(() => undefined),
+    smembers: (key)          => kv.smembers(key) as Promise<string[]>,
+  };
+}
+
+/* ─────────────────────────────────────────────
+   Pick adapter at runtime
+───────────────────────────────────────────── */
+function getStore(): KVStore {
+  if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
+    return makeKVAdapter();
+  }
+  // Local dev fallback
+  if (process.env.NODE_ENV !== "production") {
+    console.warn("[db] KV not configured — using local .data/db.json");
+    return makeFileAdapter();
+  }
+  throw new Error("KV_REST_API_URL and KV_REST_API_TOKEN must be set in production");
+}
+
+// Singleton — created once per process
+let _store: KVStore | null = null;
+function store(): KVStore {
+  if (!_store) _store = getStore();
+  return _store;
+}
+
+/* ─────────────────────────────────────────────
+   Public API — same as before
+───────────────────────────────────────────── */
 export const db = {
   users: {
     async findByEmail(email: string): Promise<DBUser | undefined> {
-      const id = await kv.get<string>(`idx:email:${email.toLowerCase()}`);
+      const id = await store().get<string>(`idx:email:${email.toLowerCase()}`);
       if (!id) return undefined;
-      return (await kv.get<DBUser>(`user:${id}`)) ?? undefined;
+      return (await store().get<DBUser>(`user:${id}`)) ?? undefined;
     },
 
     async findById(id: string): Promise<DBUser | undefined> {
-      return (await kv.get<DBUser>(`user:${id}`)) ?? undefined;
+      return (await store().get<DBUser>(`user:${id}`)) ?? undefined;
     },
 
     async findByFingerprint(fingerprintId: string): Promise<DBUser[]> {
-      const ids = await kv.smembers(`idx:fp:${fingerprintId}`) as string[];
+      const ids = await store().smembers(`idx:fp:${fingerprintId}`);
       if (!ids?.length) return [];
-      const users = await Promise.all(ids.map((id: string) => kv.get<DBUser>(`user:${id}`)));
+      const users = await Promise.all(ids.map(id => store().get<DBUser>(`user:${id}`)));
       return users.filter(Boolean) as DBUser[];
     },
 
@@ -52,21 +177,21 @@ export const db = {
         createdAt: new Date().toISOString(),
         ...data,
       };
-      await kv.set(`user:${user.id}`, user);
-      await kv.set(`idx:email:${user.email.toLowerCase()}`, user.id);
+      await store().set(`user:${user.id}`, user);
+      await store().set(`idx:email:${user.email.toLowerCase()}`, user.id);
       if (data.fingerprintId) {
-        await kv.sadd(`idx:fp:${data.fingerprintId}`, user.id);
+        await store().sadd(`idx:fp:${data.fingerprintId}`, user.id);
       }
       return user;
     },
 
     async update(id: string, data: Partial<DBUser>): Promise<DBUser | undefined> {
-      const existing = await kv.get<DBUser>(`user:${id}`);
+      const existing = await store().get<DBUser>(`user:${id}`);
       if (!existing) return undefined;
       const updated = { ...existing, ...data };
-      await kv.set(`user:${id}`, updated);
+      await store().set(`user:${id}`, updated);
       if (data.fingerprintId && data.fingerprintId !== existing.fingerprintId) {
-        await kv.sadd(`idx:fp:${data.fingerprintId}`, id);
+        await store().sadd(`idx:fp:${data.fingerprintId}`, id);
       }
       return updated;
     },
@@ -76,15 +201,16 @@ export const db = {
       data: Partial<Omit<DBUser, "id" | "createdAt" | "email">>,
     ): Promise<DBUser> {
       const existing = await db.users.findByEmail(email);
-      if (existing) {
-        return (await db.users.update(existing.id, data)) as DBUser;
-      }
-      return db.users.create({
-        email: email.toLowerCase(),
-        passwordHash: "",
-        verified: true,
-        ...data,
-      });
+      if (existing) return (await db.users.update(existing.id, data)) as DBUser;
+      return db.users.create({ email: email.toLowerCase(), passwordHash: "", verified: true, ...data });
     },
+  },
+
+  // Generic KV operations (used by stats, telegram, etc.)
+  kv: {
+    get:  <T>(key: string)                        => store().get<T>(key),
+    set:  (key: string, val: unknown, opts?: { ex?: number }) => store().set(key, val, opts),
+    del:  (key: string)                           => store().del(key),
+    incr: (key: string)                           => store().incr(key),
   },
 };

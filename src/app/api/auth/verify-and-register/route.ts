@@ -4,44 +4,56 @@ import { pendingCodes } from "@/lib/pending-codes";
 import { signToken, attachSession } from "@/lib/auth";
 
 export async function POST(req: NextRequest) {
-  let email: string, code: string;
   try {
-    ({ email, code } = await req.json());
-  } catch {
-    return NextResponse.json({ error: "invalid" }, { status: 400 });
+    let email: string, code: string, pendingToken: string;
+    try {
+      ({ email, code, pendingToken } = await req.json());
+    } catch {
+      return NextResponse.json({ error: "invalid" }, { status: 400 });
+    }
+
+    if (!email?.trim() || !code?.trim() || !pendingToken) {
+      return NextResponse.json({ error: "invalid" }, { status: 400 });
+    }
+
+    // Verify JWT token + entered code (no KV needed)
+    const verified = await pendingCodes.verify(pendingToken, code.trim());
+    if (!verified) {
+      return NextResponse.json({ error: "invalid" }, { status: 400 });
+    }
+
+    // Ensure token email matches request email
+    if (verified.email !== email.trim().toLowerCase()) {
+      return NextResponse.json({ error: "invalid" }, { status: 400 });
+    }
+
+    // Create user in DB (needs Vercel KV)
+    try {
+      let user = await db.users.findByEmail(verified.email);
+      if (!user) {
+        user = await db.users.create({
+          email:         verified.email,
+          passwordHash:  verified.passwordHash,
+          verified:      true,
+          emailVerified: true,
+        });
+      }
+
+      const token = await signToken({ sub: user.id, email: user.email });
+      const res = NextResponse.json(
+        { ok: true, id: user.id, email: user.email },
+        { status: 201 },
+      );
+      return attachSession(res, token);
+    } catch (dbErr) {
+      console.error("[verify-and-register] db error:", dbErr);
+      return NextResponse.json(
+        { error: "Database not configured — contact admin" },
+        { status: 503 },
+      );
+    }
+  } catch (err) {
+    console.error("[verify-and-register] unexpected:", err);
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
-
-  if (!email?.trim() || !code?.trim()) {
-    return NextResponse.json({ error: "invalid" }, { status: 400 });
-  }
-
-  const normalizedEmail = email.trim().toLowerCase();
-  const pending = await pendingCodes.get(normalizedEmail);
-
-  // Every failure returns the same "invalid" — no technical details exposed
-  if (!pending)                                   return NextResponse.json({ error: "invalid" }, { status: 400 });
-  if (pending.used)                               return NextResponse.json({ error: "invalid" }, { status: 400 });
-  if (new Date() > new Date(pending.expiry))      return NextResponse.json({ error: "invalid" }, { status: 400 });
-  if (code.trim() !== pending.code)               return NextResponse.json({ error: "invalid" }, { status: 400 });
-
-  // ✅ Code correct — remove entry immediately (prevents reuse)
-  await pendingCodes.remove(normalizedEmail);
-
-  // Create account (guard against race condition)
-  let user = await db.users.findByEmail(normalizedEmail);
-  if (!user) {
-    user = await db.users.create({
-      email:         normalizedEmail,
-      passwordHash:  pending.passwordHash,
-      verified:      true,
-      emailVerified: true,
-    });
-  }
-
-  const token = await signToken({ sub: user.id, email: user.email });
-  const res = NextResponse.json(
-    { ok: true, id: user.id, email: user.email },
-    { status: 201 },
-  );
-  return attachSession(res, token);
 }
