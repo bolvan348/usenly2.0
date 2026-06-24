@@ -1,41 +1,64 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef } from "react";
+
+const INTRO_FADE_MS = 500;
+const INTRO_HOLD_MS = 1200;
 
 export function SiteIntro() {
-  const [visible, setVisible] = useState(true);
-  const [fading, setFading] = useState(false);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const doneRef = useRef(false);
 
   useEffect(() => {
-    document.body.classList.add("intro-active");
-    document.documentElement.classList.add("intro-active");
+    const html = document.documentElement;
+    const body = document.body;
 
-    const fadeTimer = window.setTimeout(() => setFading(true), 1400);
-    const removeTimer = window.setTimeout(() => {
-      setVisible(false);
-      document.body.classList.remove("intro-active");
-      document.documentElement.classList.remove("intro-active");
-    }, 2000);
+    html.classList.add("intro-active");
+    body.classList.add("intro-active");
+
+    const finish = () => {
+      if (doneRef.current) return;
+      doneRef.current = true;
+      html.classList.remove("intro-active");
+      body.classList.remove("intro-active");
+      const el = overlayRef.current;
+      if (el) el.remove();
+    };
+
+    const fadeTimer = window.setTimeout(() => {
+      const el = overlayRef.current;
+      if (!el) {
+        finish();
+        return;
+      }
+      el.classList.add("intro-fading");
+    }, INTRO_HOLD_MS);
+
+    const fallbackTimer = window.setTimeout(finish, INTRO_HOLD_MS + INTRO_FADE_MS + 200);
 
     return () => {
       window.clearTimeout(fadeTimer);
-      window.clearTimeout(removeTimer);
-      document.body.classList.remove("intro-active");
-      document.documentElement.classList.remove("intro-active");
+      window.clearTimeout(fallbackTimer);
+      html.classList.remove("intro-active");
+      body.classList.remove("intro-active");
     };
   }, []);
 
-  if (!visible) return null;
-
   return (
     <div
-      className={`intro-screen fixed inset-0 z-[99999] flex items-center justify-center bg-black transition-opacity duration-[550ms] ease-out ${
-        fading ? "pointer-events-none opacity-0" : "opacity-100"
-      }`}
-      aria-hidden={fading}
+      ref={overlayRef}
+      id="site-intro"
+      className="intro-screen fixed inset-0 z-[99999] flex items-center justify-center bg-black"
+      onTransitionEnd={(e) => {
+        if (e.propertyName === "opacity" && overlayRef.current?.classList.contains("intro-fading")) {
+          overlayRef.current?.remove();
+          document.documentElement.classList.remove("intro-active");
+          document.body.classList.remove("intro-active");
+        }
+      }}
     >
-      <p className="logo-gothic-intro text-[2.4rem] sm:text-[3rem] md:text-[3.5rem]">
-        Usenly
+      <p className="font-pixel text-[2rem] tracking-[0.35em] text-white/75 sm:text-[2.75rem] md:text-[3.25rem]">
+        USENLY
       </p>
     </div>
   );

@@ -183,6 +183,25 @@
   }
 }
 
+/* Site intro */
+html.intro-active,
+body.intro-active {
+  overflow: hidden !important;
+  height: 100%;
+  background: #000 !important;
+}
+
+.intro-screen {
+  opacity: 1;
+  transition: opacity 500ms ease-out;
+  will-change: opacity;
+}
+
+.intro-screen.intro-fading {
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* ─── Google Translate font fix ─── */
 /* GT injects <font> tags that override custom fonts — force inheritance */
 font, font * {

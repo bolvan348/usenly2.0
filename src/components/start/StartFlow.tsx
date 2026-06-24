@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTonConnectUI, useTonAddress } from "@tonconnect/ui-react";
@@ -695,10 +696,10 @@ function StepDone({ email, handle, payment }: { email: string; handle: string; p
             className="flex-1 border-2 border-[#0A0A0A] bg-white py-2.5 font-pixel text-[11px] tracking-widest text-[#0A0A0A] shadow-[3px_3px_0_#0A0A0A] transition-all hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5">
             [ SHARE ]
           </button>
-          <a href="/"
+          <Link href="/"
             className="flex-1 border-2 border-[#0A0A0A] bg-[#0A0A0A] py-2.5 text-center font-pixel text-[11px] tracking-widest text-white shadow-[3px_3px_0_#CC0000] transition-all hover:shadow-none hover:translate-x-0.5 hover:translate-y-0.5">
             [ HOME ]
-          </a>
+          </Link>
         </div>
       </motion.div>
     </div>
