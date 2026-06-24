@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { VT323, Space_Mono } from "next/font/google";
-import { IntroProvider } from "@/components/intro/IntroProvider";
 import { UserProvider } from "@/lib/user-context";
 import { FingerprintInit } from "@/components/FingerprintInit";
 import { TonProviderWrapper } from "@/components/TonProviderWrapper";
@@ -34,7 +33,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="scroll-smooth">
       <body className={`${spaceMono.variable} ${vt323.variable} font-sans antialiased`}>
-        <TonProviderWrapper><UserProvider><IntroProvider><FingerprintInit />{children}</IntroProvider></UserProvider></TonProviderWrapper>
+        <TonProviderWrapper><UserProvider><FingerprintInit />{children}</UserProvider></TonProviderWrapper>
       </body>
     </html>
   );
