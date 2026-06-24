@@ -152,8 +152,12 @@ function StepRegister({ onNext }: { onNext: (email: string, opts: RegisterOpts) 
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
         });
-        const data = await res.json();
-        if (!res.ok) { setError(`ERR: ${(data.error as string).toUpperCase()}`); return; }
+        let data: Record<string, unknown> = {};
+        try { data = await res.json(); } catch { /* non-JSON response */ }
+        if (!res.ok) {
+          const msg = typeof data.error === "string" ? data.error : `SERVER ERROR ${res.status}`;
+          setError(`ERR: ${msg.toUpperCase()}`); return;
+        }
         onNext(email.trim().toLowerCase(), { mode: "register", pendingToken: data.pendingToken as string });
       } else {
         const res = await fetch("/api/auth/login", {
@@ -161,12 +165,16 @@ function StepRegister({ onNext }: { onNext: (email: string, opts: RegisterOpts) 
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
         });
-        const data = await res.json();
-        if (!res.ok) { setError(`ERR: ${(data.error as string).toUpperCase()}`); return; }
-        onNext(data.email ?? email.trim().toLowerCase(), { mode: "login", handle: data.handle });
+        let data: Record<string, unknown> = {};
+        try { data = await res.json(); } catch { /* non-JSON response */ }
+        if (!res.ok) {
+          const msg = typeof data.error === "string" ? data.error : `SERVER ERROR ${res.status}`;
+          setError(`ERR: ${msg.toUpperCase()}`); return;
+        }
+        onNext(data.email as string ?? email.trim().toLowerCase(), { mode: "login", handle: data.handle as string | null });
       }
     } catch {
-      setError("ERR: NETWORK ERROR — TRY AGAIN");
+      setError("ERR: NETWORK ERROR — CHECK YOUR CONNECTION");
     } finally {
       setLoading(false);
     }
