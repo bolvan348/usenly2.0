@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { pendingCodes } from "@/lib/pending-codes";
 import { signToken, attachSession } from "@/lib/auth";
-import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 export async function POST(req: NextRequest) {
   try {
@@ -17,37 +16,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "invalid" }, { status: 400 });
     }
 
-    // Decode JWT to get passwordHash (no code check — Supabase handles that)
-    const pending = await pendingCodes.decode(pendingToken);
-    if (!pending) {
+    // Verify JWT token + entered code (stateless — no DB needed)
+    const verified = await pendingCodes.verify(pendingToken, code.trim());
+    if (!verified) {
       return NextResponse.json({ error: "invalid" }, { status: 400 });
     }
 
     // Ensure token email matches request email
-    if (pending.email !== email.trim().toLowerCase()) {
+    if (verified.email !== email.trim().toLowerCase()) {
       return NextResponse.json({ error: "invalid" }, { status: 400 });
     }
 
-    // Verify OTP with Supabase Auth
-    const supabase = getSupabaseAdmin();
-    const { error: otpError } = await supabase.auth.verifyOtp({
-      email: pending.email,
-      token: code.trim(),
-      type:  "email",
-    });
-
-    if (otpError) {
-      console.warn("[verify-and-register] OTP invalid:", otpError.message);
-      return NextResponse.json({ error: "invalid" }, { status: 400 });
-    }
-
-    // OTP verified — create user in our DB
+    // Create user in DB
     try {
-      let user = await db.users.findByEmail(pending.email);
+      let user = await db.users.findByEmail(verified.email);
       if (!user) {
         user = await db.users.create({
-          email:         pending.email,
-          passwordHash:  pending.passwordHash,
+          email:         verified.email,
+          passwordHash:  verified.passwordHash,
           verified:      true,
           emailVerified: true,
         });
