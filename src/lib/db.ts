@@ -1,6 +1,7 @@
 /**
  * Database adapter with automatic fallback:
- *  - Vercel KV (production) when KV_REST_API_URL + KV_REST_API_TOKEN are set
+ *  - Vercel KV  (production) when KV_REST_API_URL + KV_REST_API_TOKEN are set
+ *  - PostgreSQL  (production) when POSTGRES_URL is set (e.g. Supabase)
  *  - Local JSON file (.data/db.json) for local development — no setup needed
  */
 import { randomUUID } from "crypto";
@@ -128,18 +129,100 @@ function makeKVAdapter(): KVStore {
 }
 
 /* ─────────────────────────────────────────────
+   PostgreSQL adapter (Supabase / any Postgres)
+───────────────────────────────────────────── */
+function makePostgresAdapter(): KVStore {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { Pool } = require("pg") as typeof import("pg");
+
+  // Prefer non-pooling URL for serverless (avoids pgbouncer prepared-statement issues)
+  const connectionString =
+    process.env.POSTGRES_URL_NON_POOLING ?? process.env.POSTGRES_URL;
+
+  const pool = new Pool({
+    connectionString,
+    ssl: { rejectUnauthorized: false },
+    max: 1, // keep connections minimal for serverless
+  });
+
+  return {
+    async get<T>(key: string): Promise<T | null> {
+      const { rows } = await pool.query<{ value: T }>(
+        `SELECT value FROM kv_store
+         WHERE key = $1 AND (expires_at IS NULL OR expires_at > NOW())`,
+        [key],
+      );
+      return rows[0]?.value ?? null;
+    },
+
+    async set(key: string, value: unknown, opts?: { ex?: number }): Promise<void> {
+      const expiresAt = opts?.ex
+        ? new Date(Date.now() + opts.ex * 1000).toISOString()
+        : null;
+      await pool.query(
+        `INSERT INTO kv_store (key, value, expires_at)
+         VALUES ($1, $2::jsonb, $3)
+         ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at`,
+        [key, JSON.stringify(value), expiresAt],
+      );
+    },
+
+    async del(key: string): Promise<void> {
+      await pool.query(`DELETE FROM kv_store  WHERE key = $1`, [key]);
+      await pool.query(`DELETE FROM set_store WHERE key = $1`, [key]);
+    },
+
+    async incr(key: string): Promise<number> {
+      const { rows } = await pool.query<{ value: number }>(
+        `INSERT INTO kv_store (key, value, expires_at)
+         VALUES ($1, '1'::jsonb, NULL)
+         ON CONFLICT (key) DO UPDATE
+           SET value = to_jsonb((kv_store.value::text::int + 1))
+         RETURNING value`,
+        [key],
+      );
+      return rows[0].value;
+    },
+
+    async sadd(key: string, ...members: string[]): Promise<void> {
+      for (const member of members) {
+        await pool.query(
+          `INSERT INTO set_store (key, member) VALUES ($1, $2)
+           ON CONFLICT DO NOTHING`,
+          [key, member],
+        );
+      }
+    },
+
+    async smembers(key: string): Promise<string[]> {
+      const { rows } = await pool.query<{ member: string }>(
+        `SELECT member FROM set_store WHERE key = $1`,
+        [key],
+      );
+      return rows.map(r => r.member);
+    },
+  };
+}
+
+/* ─────────────────────────────────────────────
    Pick adapter at runtime
 ───────────────────────────────────────────── */
 function getStore(): KVStore {
   if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
     return makeKVAdapter();
   }
+  if (process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING) {
+    return makePostgresAdapter();
+  }
   // Local dev fallback
   if (process.env.NODE_ENV !== "production") {
-    console.warn("[db] KV not configured — using local .data/db.json");
+    console.warn("[db] No storage configured — using local .data/db.json");
     return makeFileAdapter();
   }
-  throw new Error("KV_REST_API_URL and KV_REST_API_TOKEN must be set in production");
+  throw new Error(
+    "No storage configured. Set POSTGRES_URL (Supabase) or KV_REST_API_URL + KV_REST_API_TOKEN (Vercel KV).",
+  );
 }
 
 // Singleton — created once per process
