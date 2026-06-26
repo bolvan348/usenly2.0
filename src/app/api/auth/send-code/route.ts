@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hash } from "bcryptjs";
 import { db } from "@/lib/db";
 import { pendingCodes } from "@/lib/pending-codes";
-import { sendVerificationEmail } from "@/lib/emailjs";
+import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 export async function POST(req: NextRequest) {
   try {
@@ -25,26 +25,30 @@ export async function POST(req: NextRequest) {
 
     const normalizedEmail = email.trim().toLowerCase();
 
-    // Check duplicate — graceful if KV not configured
+    // Check duplicate
     try {
       const existing = await db.users.findByEmail(normalizedEmail);
       if (existing) {
         return NextResponse.json({ error: "This email is already registered" }, { status: 409 });
       }
     } catch {
-      // KV not configured — skip duplicate check, proceed
+      // DB not configured — skip duplicate check
     }
 
     const passwordHash = await hash(password, 12);
-    const code = String(Math.floor(100000 + Math.random() * 900000));
 
-    // Create stateless JWT token (no KV required)
-    const pendingToken = await pendingCodes.createToken(normalizedEmail, passwordHash, code);
+    // Stateless JWT carries email + passwordHash to verify-and-register
+    const pendingToken = await pendingCodes.createToken(normalizedEmail, passwordHash);
 
-    try {
-      await sendVerificationEmail(normalizedEmail, code);
-    } catch (err) {
-      console.error("[send-code] email error:", err);
+    // Send OTP via Supabase Auth (Supabase generates and emails the 6-digit code)
+    const supabase = getSupabaseAdmin();
+    const { error } = await supabase.auth.signInWithOtp({
+      email: normalizedEmail,
+      options: { shouldCreateUser: true },
+    });
+
+    if (error) {
+      console.error("[send-code] Supabase OTP error:", error);
       return NextResponse.json({ error: "Failed to send verification email" }, { status: 500 });
     }
 

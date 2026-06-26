@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { pendingCodes } from "@/lib/pending-codes";
 import { signToken, attachSession } from "@/lib/auth";
+import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,24 +17,37 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "invalid" }, { status: 400 });
     }
 
-    // Verify JWT token + entered code (no KV needed)
-    const verified = await pendingCodes.verify(pendingToken, code.trim());
-    if (!verified) {
+    // Decode JWT to get passwordHash (no code check — Supabase handles that)
+    const pending = await pendingCodes.decode(pendingToken);
+    if (!pending) {
       return NextResponse.json({ error: "invalid" }, { status: 400 });
     }
 
     // Ensure token email matches request email
-    if (verified.email !== email.trim().toLowerCase()) {
+    if (pending.email !== email.trim().toLowerCase()) {
       return NextResponse.json({ error: "invalid" }, { status: 400 });
     }
 
-    // Create user in DB (needs Vercel KV)
+    // Verify OTP with Supabase Auth
+    const supabase = getSupabaseAdmin();
+    const { error: otpError } = await supabase.auth.verifyOtp({
+      email: pending.email,
+      token: code.trim(),
+      type:  "email",
+    });
+
+    if (otpError) {
+      console.warn("[verify-and-register] OTP invalid:", otpError.message);
+      return NextResponse.json({ error: "invalid" }, { status: 400 });
+    }
+
+    // OTP verified — create user in our DB
     try {
-      let user = await db.users.findByEmail(verified.email);
+      let user = await db.users.findByEmail(pending.email);
       if (!user) {
         user = await db.users.create({
-          email:         verified.email,
-          passwordHash:  verified.passwordHash,
+          email:         pending.email,
+          passwordHash:  pending.passwordHash,
           verified:      true,
           emailVerified: true,
         });
@@ -48,7 +62,7 @@ export async function POST(req: NextRequest) {
     } catch (dbErr) {
       console.error("[verify-and-register] db error:", dbErr);
       return NextResponse.json(
-        { error: "Database not configured — contact admin" },
+        { error: "Database error — contact admin" },
         { status: 503 },
       );
     }

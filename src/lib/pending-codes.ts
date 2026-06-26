@@ -1,7 +1,7 @@
 /**
- * JWT-based pending verification codes — no KV/database required.
- * The signed token is returned to the client and sent back on verify.
- * Stateless, works on Vercel Serverless/Edge without any storage setup.
+ * JWT-based pending registration token — no KV/database required.
+ * Carries email + passwordHash so we can create the user after Supabase OTP verification.
+ * The actual OTP code is managed by Supabase Auth — we never generate it ourselves.
  */
 import { SignJWT, jwtVerify } from "jose";
 
@@ -12,8 +12,8 @@ const TTL_SECONDS = 600; // 10 minutes
 
 export const pendingCodes = {
   /** Create a signed JWT containing pending registration data. Return to client. */
-  async createToken(email: string, passwordHash: string, code: string): Promise<string> {
-    return new SignJWT({ email, passwordHash, code })
+  async createToken(email: string, passwordHash: string): Promise<string> {
+    return new SignJWT({ email, passwordHash })
       .setProtectedHeader({ alg: "HS256" })
       .setIssuedAt()
       .setExpirationTime(`${TTL_SECONDS}s`)
@@ -21,20 +21,18 @@ export const pendingCodes = {
   },
 
   /**
-   * Verify a token + user-entered code.
+   * Decode and verify the pending token (JWT signature + expiry only).
    * Returns { email, passwordHash } on success, null on any failure.
    */
-  async verify(
-    token: string,
-    code: string,
-  ): Promise<{ email: string; passwordHash: string } | null> {
+  async decode(token: string): Promise<{ email: string; passwordHash: string } | null> {
     try {
       const { payload } = await jwtVerify(token, secret());
-      if (typeof payload.code !== "string") return null;
-      if (payload.code !== code.trim()) return null;
+      if (typeof payload.email !== "string" || typeof payload.passwordHash !== "string") {
+        return null;
+      }
       return {
-        email:        payload.email as string,
-        passwordHash: payload.passwordHash as string,
+        email:        payload.email,
+        passwordHash: payload.passwordHash,
       };
     } catch {
       return null;

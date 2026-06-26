@@ -1,10 +1,6 @@
-/**
- * Resend a verification code by issuing a fresh JWT token.
- * Client must pass the old pendingToken so we can extract email/passwordHash.
- */
 import { NextRequest, NextResponse } from "next/server";
 import { pendingCodes } from "@/lib/pending-codes";
-import { sendVerificationEmail } from "@/lib/emailjs";
+import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 export async function POST(req: NextRequest) {
   try {
@@ -19,34 +15,30 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Email required" }, { status: 400 });
     }
 
-    // Verify the old token to get passwordHash (code itself can be wrong/expired — that's ok)
-    // We pass a dummy code that won't match, so we only extract payload via a relaxed verify
-    // Instead, we re-create a token using the passwordHash from the old one
-    const normalizedEmail = email.trim().toLowerCase();
-
-    // Extract payload from old token without strict code checking
-    let passwordHash = "";
-    try {
-      // Try to verify with any code — we need the passwordHash
-      const { jwtVerify } = await import("jose");
-      const secret = new TextEncoder().encode(process.env.JWT_SECRET ?? "usenly-fallback-secret-change-me");
-      const { payload } = await jwtVerify(pendingToken, secret);
-      passwordHash = payload.passwordHash as string;
-    } catch {
-      return NextResponse.json({ error: "Invalid or expired session. Please restart registration." }, { status: 400 });
+    // Verify the old token is still valid (not expired, correct signature)
+    const pending = await pendingCodes.decode(pendingToken);
+    if (!pending) {
+      return NextResponse.json(
+        { error: "Invalid or expired session. Please restart registration." },
+        { status: 400 },
+      );
     }
 
-    const newCode = String(Math.floor(100000 + Math.random() * 900000));
-    const newToken = await pendingCodes.createToken(normalizedEmail, passwordHash, newCode);
+    const normalizedEmail = email.trim().toLowerCase();
 
-    try {
-      await sendVerificationEmail(normalizedEmail, newCode);
-    } catch (err) {
-      console.error("[resend-code] email error:", err);
+    // Resend OTP via Supabase — same pendingToken returned (passwordHash unchanged)
+    const supabase = getSupabaseAdmin();
+    const { error } = await supabase.auth.signInWithOtp({
+      email: normalizedEmail,
+      options: { shouldCreateUser: true },
+    });
+
+    if (error) {
+      console.error("[resend-code] Supabase OTP error:", error);
       return NextResponse.json({ error: "Failed to send email" }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true, pendingToken: newToken });
+    return NextResponse.json({ ok: true, pendingToken });
   } catch (err) {
     console.error("[resend-code] unexpected:", err);
     return NextResponse.json({ error: "Server error" }, { status: 500 });
