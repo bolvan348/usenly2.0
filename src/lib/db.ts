@@ -119,10 +119,10 @@ function makeKVAdapter(): KVStore {
   const { kv } = require("@vercel/kv") as { kv: import("@vercel/kv").VercelKV };
   return {
     get:      (key)          => kv.get(key),
-    set:      (key, val, o)  => kv.set(key, val, o ?? {}).then(() => undefined),
+    set:      (key, val, o)  => (o?.ex !== undefined ? kv.set(key, val, { ex: o.ex }) : kv.set(key, val)).then(() => undefined),
     del:      (key)          => kv.del(key).then(() => undefined),
     incr:     (key)          => kv.incr(key),
-    sadd:     (key, ...m)    => kv.sadd(key, ...m).then(() => undefined),
+    sadd:     (key, ...m)    => kv.sadd(key, ...(m as [string, ...string[]])).then(() => undefined),
     smembers: (key)          => kv.smembers(key) as Promise<string[]>,
   };
 }
