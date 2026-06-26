@@ -243,10 +243,11 @@ function StepEmailVerify({
   onVerified: () => void;
   onTokenRefresh: (newToken: string) => void;
 }) {
-  const [code,     setCode]     = useState("");
-  const [state,    setState]    = useState<CodeState>("idle");
-  const [loading,  setLoading]  = useState(false);
-  const [cooldown, setCooldown] = useState(60);
+  const [code,        setCode]        = useState("");
+  const [state,       setState]       = useState<CodeState>("idle");
+  const [serverError, setServerError] = useState("");
+  const [loading,     setLoading]     = useState(false);
+  const [cooldown,    setCooldown]    = useState(60);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const startCooldown = useCallback(() => {
@@ -288,6 +289,7 @@ function StepEmailVerify({
     if (code.length !== 6 || loading) return;
     setLoading(true);
     setState("idle");
+    setServerError("");
     try {
       const res = await fetch("/api/auth/verify-and-register", {
         method: "POST",
@@ -298,9 +300,13 @@ function StepEmailVerify({
         setState("correct");
         setTimeout(onVerified, 900);
       } else {
+        const data = await res.json().catch(() => ({}));
+        const msg = (data?.error as string) ?? "invalid code";
+        setServerError(`ERR ${res.status}: ${msg.toUpperCase()}`);
         setState("wrong");
       }
     } catch {
+      setServerError("ERR: NETWORK ERROR");
       setState("wrong");
     } finally {
       setLoading(false);
@@ -347,7 +353,9 @@ function StepEmailVerify({
               initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
               className="flex items-center gap-2.5 border-2 border-[#CC0000] bg-[#CC0000]/8 px-4 py-3">
               <span className="font-pixel text-[16px] text-[#CC0000]">✗</span>
-              <span className="font-pixel text-[13px] tracking-widest text-[#CC0000]">Invalid code</span>
+              <span className="font-pixel text-[11px] tracking-widest text-[#CC0000]">
+                {serverError || "INVALID CODE"}
+              </span>
             </motion.div>
           )}
         </AnimatePresence>
