@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hash } from "bcryptjs";
+import { randomInt } from "crypto";
 import { db } from "@/lib/db";
 import { pendingCodes } from "@/lib/pending-codes";
 import { sendVerificationEmail } from "@/lib/emailjs";
@@ -13,7 +14,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
 
-    if (!email?.trim() || !password) {
+    if (typeof email !== "string" || !email.trim() || typeof password !== "string" || !password) {
       return NextResponse.json({ error: "Email and password are required" }, { status: 400 });
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
@@ -31,12 +32,13 @@ export async function POST(req: NextRequest) {
       if (existing) {
         return NextResponse.json({ error: "This email is already registered" }, { status: 409 });
       }
-    } catch {
-      // DB not configured — skip duplicate check, proceed
+    } catch (err) {
+      console.error("[send-code] storage unavailable:", err);
+      return NextResponse.json({ error: "Account service is temporarily unavailable. Please try again later." }, { status: 503 });
     }
 
     const passwordHash = await hash(password, 12);
-    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const code = String(randomInt(100000, 1000000));
 
     // JWT carries email + passwordHash + code — no DB write needed at this step
     const pendingToken = await pendingCodes.createToken(normalizedEmail, passwordHash, code);

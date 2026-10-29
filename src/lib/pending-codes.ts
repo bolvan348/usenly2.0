@@ -1,43 +1,35 @@
-/**
- * JWT-based pending verification codes — no KV/database required.
- * The signed token is returned to the client and sent back on verify.
- * Stateless, works on Vercel Serverless/Edge without any storage setup.
- */
-import { SignJWT, jwtVerify } from "jose";
+/** Encrypted registration state: neither the code nor password hash is public. */
+import { createHash } from "crypto";
+import { EncryptJWT, jwtDecrypt } from "jose";
+import { authSecret } from "@/lib/auth-secret";
 
-const secret = () =>
-  new TextEncoder().encode(process.env.JWT_SECRET ?? "usenly-fallback-secret-change-me");
-
-const TTL_SECONDS = 600; // 10 minutes
+const key = () => createHash("sha256").update(authSecret()).digest();
+const issuer = "usenly-registration";
 
 export const pendingCodes = {
-  /** Create a signed JWT containing pending registration data. Return to client. */
   async createToken(email: string, passwordHash: string, code: string): Promise<string> {
-    return new SignJWT({ email, passwordHash, code })
-      .setProtectedHeader({ alg: "HS256" })
+    return new EncryptJWT({ email, passwordHash, code })
+      .setProtectedHeader({ alg: "dir", enc: "A256GCM" })
+      .setIssuer(issuer)
       .setIssuedAt()
-      .setExpirationTime(`${TTL_SECONDS}s`)
-      .sign(secret());
+      .setExpirationTime("10m")
+      .encrypt(key());
   },
 
-  /**
-   * Verify a token + user-entered code.
-   * Returns { email, passwordHash } on success, null on any failure.
-   */
-  async verify(
-    token: string,
-    code: string,
-  ): Promise<{ email: string; passwordHash: string } | null> {
+  async read(token: string): Promise<{ email: string; passwordHash: string; code: string } | null> {
     try {
-      const { payload } = await jwtVerify(token, secret());
-      if (typeof payload.code !== "string") return null;
-      if (payload.code !== code.trim()) return null;
-      return {
-        email:        payload.email as string,
-        passwordHash: payload.passwordHash as string,
-      };
+      const { payload } = await jwtDecrypt(token, key(), { issuer });
+      if (typeof payload.email !== "string" || typeof payload.passwordHash !== "string" ||
+          typeof payload.code !== "string" || !/^\d{6}$/.test(payload.code)) return null;
+      return { email: payload.email, passwordHash: payload.passwordHash, code: payload.code };
     } catch {
       return null;
     }
+  },
+
+  async verify(token: string, code: string): Promise<{ email: string; passwordHash: string } | null> {
+    const pending = await pendingCodes.read(token);
+    if (!pending || pending.code !== code.trim()) return null;
+    return { email: pending.email, passwordHash: pending.passwordHash };
   },
 };

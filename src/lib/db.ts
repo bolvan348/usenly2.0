@@ -137,7 +137,7 @@ function makePostgresAdapter(): KVStore {
 
   // Prefer non-pooling URL for serverless (avoids pgbouncer prepared-statement issues)
   const connectionString =
-    process.env.POSTGRES_URL_NON_POOLING ?? process.env.POSTGRES_URL;
+    process.env.POSTGRES_URL_NON_POOLING?.trim() || process.env.POSTGRES_URL?.trim();
 
   const pool = new Pool({
     connectionString,

@@ -12,7 +12,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "invalid" }, { status: 400 });
     }
 
-    if (!email?.trim() || !code?.trim() || !pendingToken) {
+    if (typeof email !== "string" || !email.trim() || typeof code !== "string" ||
+        !/^\d{6}$/.test(code.trim()) || typeof pendingToken !== "string" || !pendingToken) {
       return NextResponse.json({ error: "invalid" }, { status: 400 });
     }
 
@@ -30,6 +31,9 @@ export async function POST(req: NextRequest) {
     // Create user in DB
     try {
       let user = await db.users.findByEmail(verified.email);
+      if (user) {
+        return NextResponse.json({ error: "This email is already registered. Please sign in." }, { status: 409 });
+      }
       if (!user) {
         user = await db.users.create({
           email:         verified.email,

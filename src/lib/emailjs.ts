@@ -8,6 +8,9 @@
 const EMAILJS_API = "https://api.emailjs.com/api/v1.0/email/send";
 
 export async function sendVerificationEmail(to: string, code: string) {
+  for (const name of ["EMAILJS_SERVICE_ID", "EMAILJS_TEMPLATE_ID", "EMAILJS_PUBLIC_KEY", "EMAILJS_PRIVATE_KEY"]) {
+    if (!process.env[name]?.trim()) throw new Error(`${name} is not configured`);
+  }
   const payload = {
     service_id:    process.env.EMAILJS_SERVICE_ID,
     template_id:   process.env.EMAILJS_TEMPLATE_ID,
