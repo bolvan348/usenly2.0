@@ -3,6 +3,7 @@
  * Client must pass the old pendingToken so we can extract email/passwordHash.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { randomInt } from "crypto";
 import { pendingCodes } from "@/lib/pending-codes";
 import { sendVerificationEmail } from "@/lib/emailjs";
 
@@ -15,30 +16,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid request" }, { status: 400 });
     }
 
-    if (!email?.trim()) {
+    if (typeof email !== "string" || !email.trim() || typeof pendingToken !== "string") {
       return NextResponse.json({ error: "Email required" }, { status: 400 });
     }
 
     const normalizedEmail = email.trim().toLowerCase();
 
     // Extract passwordHash from old token (code mismatch is fine — we issue a new one)
-    let passwordHash = "";
-    try {
-      const { jwtVerify } = await import("jose");
-      const secret = new TextEncoder().encode(
-        process.env.JWT_SECRET ?? "usenly-fallback-secret-change-me",
-      );
-      const { payload } = await jwtVerify(pendingToken, secret);
-      passwordHash = payload.passwordHash as string;
-    } catch {
+    const pending = await pendingCodes.read(pendingToken);
+    if (!pending || pending.email !== normalizedEmail) {
       return NextResponse.json(
         { error: "Invalid or expired session. Please restart registration." },
         { status: 400 },
       );
     }
 
-    const newCode = String(Math.floor(100000 + Math.random() * 900000));
-    const newToken = await pendingCodes.createToken(normalizedEmail, passwordHash, newCode);
+    const newCode = String(randomInt(100000, 1000000));
+    const newToken = await pendingCodes.createToken(normalizedEmail, pending.passwordHash, newCode);
 
     try {
       await sendVerificationEmail(normalizedEmail, newCode);

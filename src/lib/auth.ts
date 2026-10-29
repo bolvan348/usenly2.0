@@ -1,10 +1,9 @@
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { authSecret } from "@/lib/auth-secret";
 
-const SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET ?? "usenly-dev-secret-change-this-in-production",
-);
+const secret = () => new TextEncoder().encode(authSecret());
 
 export const SESSION_COOKIE = "usenly_session";
 const EXPIRY = "7d";
@@ -14,17 +13,18 @@ export interface SessionPayload extends JWTPayload {
   email: string;
 }
 
-export async function signToken(payload: Omit<SessionPayload, keyof JWTPayload>): Promise<string> {
+export async function signToken(payload: Pick<SessionPayload, "sub" | "email">): Promise<string> {
   return new SignJWT(payload as JWTPayload)
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(EXPIRY)
-    .sign(SECRET);
+    .sign(secret());
 }
 
 export async function verifyToken(token: string): Promise<SessionPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, SECRET);
+    const { payload } = await jwtVerify(token, secret(), { algorithms: ["HS256"] });
+    if (typeof payload.sub !== "string" || typeof payload.email !== "string") return null;
     return payload as SessionPayload;
   } catch {
     return null;

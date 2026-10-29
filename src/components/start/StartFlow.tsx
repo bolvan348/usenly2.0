@@ -266,7 +266,8 @@ function StepEmailVerify({
   }, [startCooldown]);
 
   async function resend() {
-    if (cooldown > 0) return;
+    if (cooldown > 0 || loading) return;
+    setServerError("");
     try {
       const res = await fetch("/api/auth/resend-code", {
         method: "POST",
@@ -274,10 +275,15 @@ function StepEmailVerify({
         body: JSON.stringify({ email, pendingToken }),
       });
       const data = await res.json();
-      if (res.ok && data.pendingToken) {
-        onTokenRefresh(data.pendingToken as string);
+      if (!res.ok || !data.pendingToken) {
+        setServerError(typeof data.error === "string" ? data.error : "Failed to resend code");
+        return;
       }
-    } catch { /* silent */ }
+      onTokenRefresh(data.pendingToken as string);
+    } catch {
+      setServerError("Network error. Please try again.");
+      return;
+    }
     setCooldown(60);
     startCooldown();
     setCode("");

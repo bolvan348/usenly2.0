@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
 
-    if (!email?.trim() || !password) {
+    if (typeof email !== "string" || !email.trim() || typeof password !== "string" || !password) {
       return NextResponse.json({ error: "Email and password are required" }, { status: 400 });
     }
 
